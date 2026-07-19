@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NovaPuraAI 浏览器自动化控制台</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500&family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="index.css">
+</head>
+<body>
+  <div class="app-container">
+    <header class="app-header">
+      <div class="header-logo">
+        <span class="logo-icon">🤖</span>
+        <div class="logo-text">
+          <h1>NovaPuraAI</h1>
+          <p>浏览器自动化中心</p>
+        </div>
+      </div>
+      <div class="header-status">
+        <span class="status-label">运行状态：</span>
+        <span id="runner-status-pill" class="status-pill status-idle">空闲</span>
+      </div>
+    </header>
+
+    <div id="intervention-notice" class="intervention-notice hidden" role="status" aria-live="polite">
+      <span id="intervention-notice-icon" class="intervention-notice-icon">ℹ️</span>
+      <div>
+        <strong id="intervention-notice-title">请在自动打开的网页中完成操作</strong>
+        <p id="intervention-notice-message">完成后系统会自动继续。</p>
+      </div>
+    </div>
+
+    <div class="workspace-grid">
+      <aside class="sidebar">
+        <div class="card card-accent-blue">
+          <h3>🚀 控制面板</h3>
+          <div class="control-actions">
+            <button id="btn-run" class="btn btn-primary btn-block">🚀 开始自动化</button>
+            <button id="btn-stop" class="btn btn-danger btn-block" disabled>🛑 停止自动化</button>
+          </div>
+        </div>
+
+        <div class="card mt-4">
+          <h3>⚙️ 运行配置</h3>
+          <p class="section-tip">Captcha 和邮箱验证码都直接在自动打开的网页中完成；控制台只负责提醒。</p>
+          <form id="config-form" class="config-form">
+            <div class="form-group">
+              <label for="targetUrl">目标注册地址</label>
+              <input type="url" id="targetUrl" placeholder="https://build.nvidia.com/settings/api-keys" required>
+            </div>
+            <div class="form-group">
+              <label for="parallelism">同时运行窗口数（1–5）</label>
+              <input id="parallelism" type="number" min="1" max="5" value="3" required>
+            </div>
+            <button type="submit" class="btn btn-secondary btn-block">保存配置</button>
+          </form>
+        </div>
+      </aside>
+
+      <main class="main-content">
+        <nav class="tab-nav">
+          <button class="tab-btn active" onclick="switchTab('tab-users')">👥 测试用户</button>
+          <button class="tab-btn" onclick="switchTab('tab-logs')">📟 执行日志</button>
+          <button class="tab-btn" onclick="switchTab('tab-results')">🔑 已导出的 API Key</button>
+        </nav>
+
+        <section id="tab-users" class="tab-section">
+          <div class="users-header">
+            <h3>测试用户管理</h3>
+            <button id="btn-show-add-modal" class="btn btn-emerald" onclick="toggleAddUserForm()">➕ 添加测试用户</button>
+          </div>
+
+          <div id="add-user-form-container" class="card add-user-card hidden mt-3">
+            <h4>添加测试用户</h4>
+            <form id="add-user-form" class="user-grid-form">
+              <div class="form-group">
+                <label>用户标签</label>
+                <input type="text" id="user-testName" placeholder="test_user_3" required>
+              </div>
+              <div class="form-group">
+                <label>公司</label>
+                <input type="text" id="user-testCompany" placeholder="NVIDIA Corp" required>
+              </div>
+              <div class="form-group">
+                <label>邮箱</label>
+                <input type="email" id="user-testEmail" placeholder="test_user_3@example.com" required>
+              </div>
+              <div class="form-group">
+                <label>用户名</label>
+                <input type="text" id="user-testUsername" placeholder="tester3" required>
+              </div>
+              <div class="form-group">
+                <label>出生日期</label>
+                <input type="date" id="user-testDOB" required>
+              </div>
+              <div class="form-group">
+                <label>密码</label>
+                <input type="text" id="user-testPassword" placeholder="Pass123!" required>
+              </div>
+              <div class="form-actions-full">
+                <button type="submit" class="btn btn-emerald">保存用户</button>
+                <button type="button" class="btn btn-secondary" onclick="toggleAddUserForm()">取消</button>
+              </div>
+            </form>
+          </div>
+
+          <div id="users-list" class="users-list-grid mt-4"></div>
+        </section>
+
+        <section id="tab-logs" class="tab-section hidden">
+          <div class="card log-container-card">
+            <div class="terminal-header">
+              <div class="dots">
+                <span class="dot red"></span>
+                <span class="dot yellow"></span>
+                <span class="dot green"></span>
+              </div>
+              <span class="terminal-title">puppeteer-runner-output.log</span>
+              <button id="btn-clear-logs" class="btn btn-secondary btn-sm" onclick="clearLocalLogs()">清空日志</button>
+            </div>
+            <div id="terminal-logs" class="terminal-body">
+              <div class="log-line log-info">系统已初始化，可以开始自动化。</div>
+            </div>
+          </div>
+        </section>
+
+        <section id="tab-results" class="tab-section hidden">
+          <div class="card">
+            <div class="results-header">
+              <h3>🔑 已提取的 API Key</h3>
+              <p>结果来自自动化流程，并同步保存到 <code>api_keys_test.md</code>。</p>
+            </div>
+            <div class="results-table-container">
+              <table class="results-table">
+                <thead>
+                  <tr>
+                    <th>测试用户</th>
+                    <th>提取的 API Key</th>
+                  </tr>
+                </thead>
+                <tbody id="results-table-body">
+                  <tr>
+                    <td colspan="2" class="text-center">尚无结果，请先运行自动化。</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <script src="index.js"></script>
+</body>
+</html>

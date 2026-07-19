@@ -1,0 +1,4 @@
+{
+  "targetUrl": "https://build.nvidia.com/settings/api-keys",
+  "parallelism": 3
+}

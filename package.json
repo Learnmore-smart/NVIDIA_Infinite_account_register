@@ -1,0 +1,15 @@
+{
+  "name": "novapuraai-nvidia-js",
+  "version": "1.0.0",
+  "description": "Compliant browser automation template for sandbox testing environments",
+  "main": "script.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "express": "^5.2.1",
+    "puppeteer": "^22.12.0"
+  }
+}

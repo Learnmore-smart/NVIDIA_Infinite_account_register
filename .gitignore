@@ -1,0 +1,37 @@
+# Dependencies
+node_modules/
+
+# Environment variables and secrets
+.env
+.env.local
+.env.*.local
+
+# Sensitive test data (contains API keys / user passwords)
+users_config.json
+api_keys_test.md
+
+# Agent memory and AI tooling
+.ai/
+.playwright-mcp/
+
+# Browser automation data (Chrome/Edge user data, profiles, caches)
+.chrome_automation_profiles/
+.chrome_automation_user_data/
+.edge_automation_user_data/
+.edge_user_data/
+.gmail_edge_user_data/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
