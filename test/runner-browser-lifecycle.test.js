@@ -361,6 +361,51 @@ test('registration clicks Create Account initially and again after captcha resol
   ]);
 });
 
+test('keeps the browser open when the submit button is gated behind the captcha', async () => {
+  // The Create Account / Log In control is disabled until the human clears hCaptcha,
+  // so the initial and post-captcha submit attempts return false. The flow must wait
+  // for the captcha and the eventual navigation instead of throwing (which would close
+  // the browser mid-verification).
+  const events = [];
+  let waitCall = 0;
+  const captchaStateHandle = {
+    jsonValue: async () => 'captcha',
+    dispose: async () => { events.push('dispose-state'); }
+  };
+  const runner = new PuppeteerRunner({
+    users: [],
+    automationConfig: {},
+    manualStepTimeoutMs: 12345
+  });
+  runner.page = {
+    waitForFunction: async (_fn, options) => {
+      events.push(`wait:${options.timeout}`);
+      waitCall++;
+      return waitCall === 1 ? captchaStateHandle : undefined;
+    }
+  };
+  runner.handleCaptchaIntervention = async user => {
+    events.push(`captcha:${user.testName}`);
+  };
+  runner.submitVisibleAccountAction = async () => {
+    events.push('submit-visible');
+    return false;
+  };
+
+  await assert.doesNotReject(() => runner.waitForAccountNavigationAfterCaptcha(
+    'https://login.nvidia.com/v1/login/password',
+    { testName: 'test_user_9' }
+  ));
+  assert.deepEqual(events, [
+    'submit-visible',
+    'wait:12345',
+    'dispose-state',
+    'captcha:test_user_9',
+    'submit-visible',
+    'wait:12345'
+  ]);
+});
+
 test('registration submission clicks the sole visible Create Account action by text', async () => {
   let clickCount = 0;
   const visibleElement = extra => ({

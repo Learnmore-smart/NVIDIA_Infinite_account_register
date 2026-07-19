@@ -648,10 +648,15 @@ class PuppeteerRunner {
   ) {
     if (this.isStopped) return false;
     const submitted = await this.submitVisibleAccountAction();
-    if (!submitted) {
-      throw new Error('Unable to find a visible enabled Create Account or Login control');
+    if (submitted) {
+      this.log('[INFO] 已提交当前账户操作；如出现人机验证，请在当前页面完成，之后将自动再次读取按钮文字并提交。', 'info');
+    } else {
+      // The Create Account / Log In control is frequently disabled until the human
+      // clears the hCaptcha challenge. Keep the browser open and fall through to the
+      // wait below (which detects the captcha or a page transition) instead of
+      // throwing, which would tear the whole session down before verification.
+      this.log('[INFO] 暂无可点击的账户操作按钮（通常需先完成人机验证）；保持窗口打开并等待验证或页面变化。', 'info');
     }
-    this.log('[INFO] 已提交当前账户操作；如出现人机验证，请在当前页面完成，之后将自动再次读取按钮文字并提交。', 'info');
 
     const stateHandle = await this.page.waitForFunction(url => {
       if (location.href !== url) return 'navigated';
@@ -694,7 +699,10 @@ class PuppeteerRunner {
     }
     const resubmitted = await this.submitVisibleAccountAction();
     if (!resubmitted) {
-      throw new Error('Unable to find a visible account action after captcha completion');
+      // After the human solves the captcha, NVIDIA often auto-advances (the submit
+      // button becomes a spinner or is removed). Do not throw—that would close the
+      // browser mid-flow. Keep the window open and wait for the page to navigate.
+      this.log('[INFO] 验证完成后未找到可点击的账户操作按钮；等待页面自动跳转（保持窗口打开）。', 'info');
     }
     await this.page.waitForFunction(url => location.href !== url, { timeout }, previousUrl);
     if (!this.isStopped) {
