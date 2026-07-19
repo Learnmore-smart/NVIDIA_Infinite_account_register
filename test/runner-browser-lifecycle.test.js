@@ -1294,6 +1294,29 @@ test('keeps waiting when a visible captcha iframe has no response token', async 
   assert.equal(await runner.detectCaptcha(), 'iframe[src*="hcaptcha"]');
 });
 
+test('treats a solved hCaptcha checkbox (aria-checked) as resolved even without a token', async () => {
+  // The checkbox widget keeps its iframe visible after success, so completion must
+  // be recognized via aria-checked="true" (searched across every frame).
+  const runner = new PuppeteerRunner({ users: [], automationConfig: {} });
+  runner.page = {
+    frames: () => [{
+      evaluate: async fn => {
+        global.document = {
+          querySelector: sel => sel.includes('aria-checked="true"') ? {} : null
+        };
+        try {
+          return fn();
+        } finally {
+          delete global.document;
+        }
+      }
+    }]
+  };
+
+  assert.equal(await runner.isCaptchaSolved(), true);
+  assert.equal(await runner.detectCaptcha(), null);
+});
+
 test('automatically continues after captcha disappears without a manual click', async () => {
   const states = [];
   const bannerModes = [];

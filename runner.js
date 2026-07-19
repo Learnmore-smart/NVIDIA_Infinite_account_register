@@ -593,21 +593,36 @@ class PuppeteerRunner {
     });
   }
 
-  async detectCaptcha() {
-    try {
-      const hasResponseToken = await this.page.evaluate(() => [
-        'textarea[name="h-captcha-response"]',
-        'textarea[name="g-recaptcha-response"]',
-        'input[name="cf-turnstile-response"]',
-        'textarea[name="cf-turnstile-response"]'
-      ].some(selector => {
-        const field = document.querySelector(selector);
-        return typeof field?.value === 'string' && field.value.trim().length > 0;
-      }));
-      if (hasResponseToken) return null;
-    } catch (error) {
-      this.log(`[WARN] 无法读取验证码响应状态：${error.message}`, 'warning');
+  async isCaptchaSolved() {
+    // The human can pass the challenge without the widget's iframe ever
+    // disappearing (hCaptcha's checkbox keeps its iframe on-screen), so rely on
+    // definitive "passed" signals and search every frame, not just the main one.
+    const frames = typeof this.page.frames === 'function' ? this.page.frames() : [this.page];
+    for (const frame of frames) {
+      try {
+        const solved = await frame.evaluate(() => {
+          const tokenNames = ['h-captcha-response', 'g-recaptcha-response', 'cf-turnstile-response'];
+          const hasToken = tokenNames.some(name => {
+            const field = document.querySelector(`textarea[name="${name}"], input[name="${name}"]`);
+            return typeof field?.value === 'string' && field.value.trim().length > 0;
+          });
+          if (hasToken) return true;
+          // hCaptcha's checkbox widget flips its checkbox to aria-checked="true"
+          // once the human passes it, even though the iframe stays visible.
+          return Boolean(document.querySelector(
+            '#checkbox[aria-checked="true"], [role="checkbox"][aria-checked="true"]'
+          ));
+        });
+        if (solved) return true;
+      } catch (error) {
+        // A frame can navigate/detach mid-check; ignore it and try the others.
+      }
     }
+    return false;
+  }
+
+  async detectCaptcha() {
+    if (await this.isCaptchaSolved()) return null;
 
     const selectors = [
       'iframe[src*="recaptcha"]',
@@ -782,7 +797,8 @@ class PuppeteerRunner {
         'button, input[type="submit"], input[type="button"], [role="button"]'
       ));
       const actionControl = controls.find(control => {
-        const label = (control.textContent || control.value || control.getAttribute?.('aria-label') || '').trim();
+        // Collapse incidental whitespace/newlines so spacing never breaks the match.
+        const label = (control.textContent || control.value || control.getAttribute?.('aria-label') || '').replace(/\s+/g, ' ').trim();
         return /^(创建账户|Create Account|登录|登录客户端|Log In|Sign In)$/i.test(label)
           && isVisible(control)
           && !control.disabled
