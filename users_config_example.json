@@ -1,0 +1,10 @@
+[
+  {
+    "testName": "test_user_1",
+    "testCompany": "Example-Labs",
+    "testEmail": "example@gmail.com",
+    "testUsername": "exampleuser1",
+    "testDOB": "1995-01-01",
+    "testPassword": "Ex@mple_Passw0rd!"
+  }
+]
