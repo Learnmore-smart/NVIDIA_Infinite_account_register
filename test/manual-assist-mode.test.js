@@ -7,19 +7,25 @@ const PuppeteerRunner = require('../runner');
 const runnerSource = fs.readFileSync(path.join(__dirname, '..', 'runner.js'), 'utf8');
 const legacyScriptSource = fs.readFileSync(path.join(__dirname, '..', 'script.js'), 'utf8');
 
-test('runner activates only cookie consent, verified email Next, the sole account action, and passkey Later', () => {
-  assert.equal([...runnerSource.matchAll(/\.click\s*\(/g)].length, 4);
+test('runner activates only cookie consent, verified email Next, the sole account action, passkey Later, passkey skip confirm, developer-consent submit, and cloud-account create', () => {
+  assert.equal([...runnerSource.matchAll(/\.click\s*\(/g)].length, 7);
   assert.doesNotMatch(runnerSource, /page\.click\s*\(/);
   assert.doesNotMatch(runnerSource, /Runtime\.callFunctionOn/);
   assert.doesNotMatch(runnerSource, /clickButtonByText|submitExistingLogin/);
   assert.doesNotMatch(runnerSource, /resubmitCreateAccountAfterCaptcha|waitForRegistrationNavigationAfterCaptcha|submitAccountForm|accountMode/);
   assert.match(runnerSource, /submitVisibleAccountAction[\s\S]*?handleCaptchaIntervention[\s\S]*?submitVisibleAccountAction[\s\S]*?waitForFunction/);
   assert.match(runnerSource, /skipPasskeyCreation[\s\S]*?稍后再说/);
+  assert.match(runnerSource, /确定要跳过设置通行密钥[\s\S]*?\/\^\(确定\|确认\|Confirm\|OK\|Yes\)\$\/i[\s\S]*?confirmControl\.click\(\)/);
+  assert.match(runnerSource, /clickConsentSubmitInAnyFrame[\s\S]*?label === '提交'[\s\S]*?submitControl\.click\(\)/);
+  assert.match(runnerSource, /createCloudAccount[\s\S]*?Create\\s\*NVIDIA\\s\*Cloud\\s\*Account[\s\S]*?submitControl\.click\(\)/);
   assert.match(runnerSource, /await this\.page\.goto[\s\S]*?await this\.dismissCookieBanner\(\);[\s\S]*?await this\.fillEmailInput[\s\S]*?await this\.clickEmailNextAfterVerification/);
   assert.equal([...legacyScriptSource.matchAll(/\.click\s*\(/g)].length, 1);
   assert.doesNotMatch(legacyScriptSource, /page\.click\s*\(|Runtime\.callFunctionOn/);
   assert.match(legacyScriptSource, /await page\.goto[\s\S]*?await dismissCookieBanner\(page\);[\s\S]*?await fillStandardInput/);
 });
+
+
+
 
 test('prepares a clean cache and storage boundary for every user attempt', async () => {
   const commands = [];

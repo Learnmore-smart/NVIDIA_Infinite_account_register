@@ -178,14 +178,84 @@ class PuppeteerRunner {
     }
   }
 
+  async clickConsentSubmitInAnyFrame() {
+    const frames = typeof this.page.frames === 'function' ? this.page.frames() : [this.page];
+    for (const frame of frames) {
+      let result;
+      try {
+        result = await frame.evaluate(() => {
+          const isVisibleAndEnabled = control => {
+            if (!control || control.disabled || control.getAttribute?.('aria-disabled') === 'true') return false;
+            const rect = control.getBoundingClientRect();
+            const style = window.getComputedStyle(control);
+            return rect.width > 0 && rect.height > 0
+              && style.display !== 'none'
+              && style.visibility !== 'hidden';
+          };
+          // Whitespace-insensitive so incidental spacing/newlines never break the match.
+          const normalize = value => (value || '').replace(/\s+/g, '');
+          const controls = Array.from(document.querySelectorAll(
+            'button, input[type="submit"], input[type="button"], [role="button"]'
+          )).filter(isVisibleAndEnabled);
+          // Only the submit action is activated; the two recommendation checkboxes
+          // are optional promotions and must remain untouched.
+          const submitControl = controls.find(control => {
+            const label = normalize(control.textContent || control.value || control.getAttribute?.('aria-label'));
+            return label === '提交' || label.toLowerCase() === 'submit';
+          })
+            || controls.find(control => {
+              const type = (control.getAttribute?.('type') || control.type || '').toLowerCase();
+              return type === 'submit';
+            })
+            || controls.find(control => {
+              const label = normalize(control.textContent || control.value || control.getAttribute?.('aria-label'));
+              return label.includes('提交') || /submit/i.test(label);
+            });
+          if (!submitControl) return { clicked: false };
+          const label = (submitControl.textContent || submitControl.value || submitControl.getAttribute?.('aria-label') || '').trim();
+          submitControl.click();
+          return { clicked: true, label };
+        });
+      } catch (error) {
+        result = { clicked: false };
+      }
+      if (result && result.clicked) return result;
+    }
+    return { clicked: false };
+  }
+
   async waitForDeveloperConsentCompletion() {
     if (this.isStopped || !this.page) return false;
     const consentUrl = this.page.url();
-    return this.waitForHumanNavigation(
-      consentUrl,
-      '已识别 NVIDIA 开发者设置页，请人工选择选项并点击提交'
+
+    // NVIDIA renders this consent page asynchronously (and may host it in a
+    // sub-frame), so poll briefly instead of relying on a single lookup.
+    let clicked = false;
+    for (let attempt = 0; attempt < 20 && !clicked && !this.isStopped; attempt++) {
+      const result = await this.clickConsentSubmitInAnyFrame();
+      clicked = result.clicked;
+      if (clicked) {
+        this.log(`[INFO] 已自动点击 NVIDIA 开发者设置页的“${result.label || '提交'}”（推荐设置复选框保持不变）。`, 'info');
+        break;
+      }
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+
+    if (!clicked && !this.isStopped) {
+      this.log('[WARN] 未找到可点击的“提交”按钮；保持窗口打开并等待页面前进。', 'warning');
+    }
+
+    await this.page.waitForFunction(
+      url => location.href !== url,
+      { timeout: this.manualStepTimeoutMs },
+      consentUrl
     );
+    if (!this.isStopped) {
+      this.log('✅ 已检测到页面前进：NVIDIA 开发者设置页已提交。', 'success');
+    }
+    return !this.isStopped;
   }
+
 
   async createCloudAccount(user) {
     if (this.isStopped || !this.page) return false;
@@ -212,10 +282,43 @@ class PuppeteerRunner {
 
     await this.fillStandardInput('input[name="name"]', accountName, { maxAttempts: 2 });
     const cloudAccountUrl = this.page.url();
-    return this.waitForHumanNavigation(
-      cloudAccountUrl,
-      'Cloud Account 名称已填写，请人工检查并点击创建'
+
+    const clicked = await this.page.evaluate(() => {
+      const isVisibleAndEnabled = control => {
+        if (!control || control.disabled || control.getAttribute?.('aria-disabled') === 'true') return false;
+        const rect = control.getBoundingClientRect();
+        const style = window.getComputedStyle(control);
+        return rect.width > 0 && rect.height > 0
+          && style.display !== 'none'
+          && style.visibility !== 'hidden';
+      };
+      const submitControl = Array.from(document.querySelectorAll(
+        'button, input[type="submit"], input[type="button"], [role="button"]'
+      )).find(control => {
+        const label = (control.textContent || control.value || control.getAttribute?.('aria-label') || '').trim();
+        return /^(创建\s*NVIDIA\s*Cloud\s*Account|Create\s*NVIDIA\s*Cloud\s*Account|创建\s*Cloud\s*Account)$/i.test(label)
+          && isVisibleAndEnabled(control);
+      });
+      if (!submitControl) return false;
+      submitControl.click();
+      return true;
+    });
+
+    if (clicked) {
+      this.log('[INFO] Cloud Account 名称已填写，已自动点击“Create NVIDIA Cloud Account”。', 'info');
+    } else {
+      this.log('[INFO] 未找到可点击的“Create NVIDIA Cloud Account”按钮；保持窗口打开并等待页面前进。', 'info');
+    }
+
+    await this.page.waitForFunction(
+      url => location.href !== url,
+      { timeout: this.manualStepTimeoutMs },
+      cloudAccountUrl
     );
+    if (!this.isStopped) {
+      this.log('✅ 已检测到页面前进：NVIDIA Cloud Account 已创建。', 'success');
+    }
+    return !this.isStopped;
   }
 
   async waitForApiKeyPage() {
@@ -253,8 +356,15 @@ class PuppeteerRunner {
       if (/(创建通行密钥|Create (?:a )?passkey)/i.test(pageText) && passkeyLater) {
         return 'passkey';
       }
-      if (location.hostname === 'static-login.nvidia.com'
-        && location.pathname.includes('/consent/developer/')) {
+      const consentSubmit = Array.from(document.querySelectorAll(
+        'button, input[type="submit"], input[type="button"], [role="button"]'
+      )).find(control => {
+        const label = (control.textContent || control.value || control.getAttribute?.('aria-label') || '').trim();
+        return /^(提交|Submit)$/i.test(label) && isVisibleAndEnabled(control);
+      });
+      if ((location.hostname === 'static-login.nvidia.com'
+        && location.pathname.includes('/consent/developer/'))
+        || (/(快完成了|请确认以下信息以完成注册|推荐设置)/.test(pageText) && consentSubmit)) {
         return 'developer-consent';
       }
       if (location.hostname === 'cloudaccounts.nvidia.com'
@@ -305,6 +415,56 @@ class PuppeteerRunner {
     }
 
     this.log('[INFO] 已自动点击通行密钥页面的“稍后再说”。', 'info');
+
+    // NVIDIA shows a confirmation modal ("您确定要跳过设置通行密钥吗？"). Click only
+    // its exact 确定/Confirm action; 取消/Cancel must never be clicked. The modal is
+    // optional, so a short bounded wait that times out simply continues the flow.
+    try {
+      await this.page.waitForFunction(() => {
+        const isVisibleAndEnabled = control => {
+          if (!control || control.disabled || control.getAttribute?.('aria-disabled') === 'true') return false;
+          const rect = control.getBoundingClientRect();
+          const style = window.getComputedStyle(control);
+          return rect.width > 0 && rect.height > 0
+            && style.display !== 'none'
+            && style.visibility !== 'hidden';
+        };
+        const text = document.body?.innerText || '';
+        if (!/(确定要跳过设置通行密钥|sure you want to skip)/i.test(text)) return false;
+        return Array.from(document.querySelectorAll(
+          'button, input[type="submit"], input[type="button"], [role="button"]'
+        )).some(control => {
+          const label = (control.textContent || control.value || control.getAttribute?.('aria-label') || '').trim();
+          return /^(确定|确认|Confirm|OK|Yes)$/i.test(label) && isVisibleAndEnabled(control);
+        });
+      }, { timeout: 10000 });
+
+      const confirmed = await this.page.evaluate(() => {
+        const isVisibleAndEnabled = control => {
+          if (!control || control.disabled || control.getAttribute?.('aria-disabled') === 'true') return false;
+          const rect = control.getBoundingClientRect();
+          const style = window.getComputedStyle(control);
+          return rect.width > 0 && rect.height > 0
+            && style.display !== 'none'
+            && style.visibility !== 'hidden';
+        };
+        const confirmControl = Array.from(document.querySelectorAll(
+          'button, input[type="submit"], input[type="button"], [role="button"]'
+        )).find(control => {
+          const label = (control.textContent || control.value || control.getAttribute?.('aria-label') || '').trim();
+          return /^(确定|确认|Confirm|OK|Yes)$/i.test(label) && isVisibleAndEnabled(control);
+        });
+        if (!confirmControl) return false;
+        confirmControl.click();
+        return true;
+      });
+      if (confirmed) {
+        this.log('[INFO] 已自动点击跳过通行密钥确认弹窗的“确定”。', 'info');
+      }
+    } catch (error) {
+      // No confirmation modal appeared within the short window; continue the flow.
+    }
+
     await this.page.waitForFunction(previousUrl => {
       if (location.href !== previousUrl) return true;
       const controls = Array.from(document.querySelectorAll(

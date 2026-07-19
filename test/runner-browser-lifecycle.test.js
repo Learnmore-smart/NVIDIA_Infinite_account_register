@@ -23,7 +23,8 @@ test('uses one extended timeout for every human-paced route transition', async (
     waitForFunction: async (_fn, options) => {
       observedTimeouts.push(options.timeout);
       return stateHandle;
-    }
+    },
+    evaluate: async () => false
   };
   runner.fillStandardInput = async () => {};
 
@@ -828,24 +829,71 @@ test('continues after target-page navigation destroys the old verification conte
   assert.deepEqual(states.map(state => state.status), ['waiting', 'resolved']);
 });
 
-test('leaves developer consent controls to the human and waits for navigation', async () => {
+test('auto-clicks the developer consent submit and waits for navigation', async () => {
   const consentUrl = 'https://static-login.nvidia.com/service/default/noir/consent/developer/v1-1';
-  const waits = [];
+  const waitArgs = [];
+  let clickedSubmit = false;
+  let clickedCheckbox = false;
+  const submitControl = {
+    textContent: '提交',
+    disabled: false,
+    getAttribute: () => null,
+    getBoundingClientRect: () => ({ width: 120, height: 40 }),
+    click: () => { clickedSubmit = true; }
+  };
+  const checkboxControl = {
+    textContent: '',
+    type: 'checkbox',
+    disabled: false,
+    getAttribute: () => null,
+    getBoundingClientRect: () => ({ width: 16, height: 16 }),
+    click: () => { clickedCheckbox = true; }
+  };
+  const withConsentDom = fn => {
+    global.location = { href: consentUrl };
+    global.document = {
+      querySelectorAll: () => [checkboxControl, submitControl]
+    };
+    global.window = {
+      getComputedStyle: () => ({ display: 'block', visibility: 'visible' })
+    };
+    try {
+      return fn();
+    } finally {
+      delete global.location;
+      delete global.document;
+      delete global.window;
+    }
+  };
   const runner = new PuppeteerRunner({ users: [], automationConfig: {} });
-  runner.page = { url: () => consentUrl };
-  runner.waitForHumanNavigation = async (url, step) => waits.push({ url, step });
+  runner.page = {
+    url: () => consentUrl,
+    frames: () => [{ evaluate: async fn => withConsentDom(fn) }],
+    evaluate: async fn => withConsentDom(fn),
+    waitForFunction: async (fn, options, url) => { waitArgs.push({ options, url }); }
+  };
 
-  await runner.waitForDeveloperConsentCompletion();
-  assert.equal(waits.length, 1);
-  assert.equal(waits[0].url, consentUrl);
-  assert.match(waits[0].step, /人工/);
+  assert.equal(await runner.waitForDeveloperConsentCompletion(), true);
+  assert.equal(clickedSubmit, true);
+  assert.equal(clickedCheckbox, false);
+  assert.equal(waitArgs.length, 1);
+  assert.equal(waitArgs[0].url, consentUrl);
 });
 
-test('fills the exact NVIDIA account-name field and leaves creation to the human', async () => {
+
+test('fills the exact NVIDIA account-name field and auto-clicks Create NVIDIA Cloud Account', async () => {
   let waitCalls = 0;
+  let clickedCreate = false;
   const cloudUrl = 'https://cloudaccounts.nvidia.com/sf/v2/select-account';
   const input = {
     getBoundingClientRect: () => ({ width: 452, height: 30 })
+  };
+  const createButton = {
+    textContent: 'Create NVIDIA Cloud Account',
+    disabled: false,
+    getAttribute: () => null,
+    getBoundingClientRect: () => ({ width: 220, height: 40 }),
+    click: () => { clickedCreate = true; }
   };
   const withCloudAccountDom = fn => {
     global.location = {
@@ -854,7 +902,8 @@ test('fills the exact NVIDIA account-name field and leaves creation to the human
       pathname: '/sf/v2/select-account'
     };
     global.document = {
-      querySelector: selector => selector === 'input[name="name"]' ? input : null
+      querySelector: selector => selector === 'input[name="name"]' ? input : null,
+      querySelectorAll: () => [createButton]
     };
     global.window = {
       getComputedStyle: () => ({ display: 'block', visibility: 'visible' })
@@ -868,13 +917,9 @@ test('fills the exact NVIDIA account-name field and leaves creation to the human
     }
   };
   const fills = [];
-  const humanWaits = [];
+  const navWaits = [];
   const runner = new PuppeteerRunner({ users: [], automationConfig: {} });
   runner.fillStandardInput = async (selector, value) => fills.push({ selector, value });
-  runner.waitForHumanNavigation = async (url, step) => {
-    humanWaits.push({ url, step });
-    return true;
-  };
   runner.page = {
     url: () => cloudUrl,
     waitForFunction: async (fn, _options, ...args) => {
@@ -883,6 +928,7 @@ test('fills the exact NVIDIA account-name field and leaves creation to the human
         assert.equal(withCloudAccountDom(fn), true);
         return;
       }
+      navWaits.push(args[0]);
     },
     evaluate: async fn => withCloudAccountDom(fn)
   };
@@ -892,10 +938,11 @@ test('fills the exact NVIDIA account-name field and leaves creation to the human
     testCloudAccount: 'obsolete-value'
   }), true);
   assert.deepEqual(fills, [{ selector: 'input[name="name"]', value: 'CloudNine-Research' }]);
-  assert.equal(waitCalls, 1);
-  assert.equal(humanWaits.length, 1);
-  assert.match(humanWaits[0].step, /人工/);
+  assert.equal(clickedCreate, true);
+  assert.equal(waitCalls, 2);
+  assert.deepEqual(navWaits, [cloudUrl]);
 });
+
 
 test('waits for the authenticated Build API-key page before using the active session', async () => {
   let waitCalls = 0;
@@ -979,9 +1026,11 @@ test('recognizes the exact NVIDIA post-authentication routes', async () => {
   }
 });
 
-test('clicks Later on the passkey prompt and waits for that page to advance', async () => {
+test('clicks Later then Confirm on the passkey skip modal and waits for the page to advance', async () => {
   let laterClicks = 0;
   let createClicks = 0;
+  let confirmClicks = 0;
+  let cancelClicks = 0;
   const visibleControl = (textContent, click) => ({
     textContent,
     disabled: false,
@@ -991,7 +1040,9 @@ test('clicks Later on the passkey prompt and waits for that page to advance', as
   });
   const controls = [
     visibleControl('立即创建', () => { createClicks++; }),
-    visibleControl('稍后再说', () => { laterClicks++; })
+    visibleControl('稍后再说', () => { laterClicks++; }),
+    visibleControl('取消', () => { cancelClicks++; }),
+    visibleControl('确定', () => { confirmClicks++; })
   ];
   const waits = [];
   const runner = new PuppeteerRunner({ users: [], automationConfig: {}, manualStepTimeoutMs: 12345 });
@@ -1015,11 +1066,17 @@ test('clicks Later on the passkey prompt and waits for that page to advance', as
   assert.equal(await runner.skipPasskeyCreation(), true);
   assert.equal(laterClicks, 1);
   assert.equal(createClicks, 0);
-  assert.deepEqual(waits, [{
-    timeout: 12345,
-    previousUrl: 'https://login.nvgs.nvidia.com/v1/create-passkey'
-  }]);
+  assert.equal(confirmClicks, 1);
+  assert.equal(cancelClicks, 0);
+  assert.deepEqual(waits, [
+    { timeout: 10000, previousUrl: undefined },
+    {
+      timeout: 12345,
+      previousUrl: 'https://login.nvgs.nvidia.com/v1/create-passkey'
+    }
+  ]);
 });
+
 
 test('skips passkey creation before human consent and Cloud Account creation', async () => {
   const states = ['passkey', 'developer-consent', 'cloud-account', 'api-key'];
