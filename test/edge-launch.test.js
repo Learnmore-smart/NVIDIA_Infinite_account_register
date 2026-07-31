@@ -80,6 +80,24 @@ test('creates normal local Chrome target options on a project-only profile', () 
   assert.ok(options.ignoreDefaultArgs.includes('--disable-extensions'));
 });
 
+test('createChromeTargetLaunchOptions accepts residential proxy server', () => {
+  const env = {
+    PROGRAMFILES: 'C:\\Program Files',
+    LOCALAPPDATA: 'C:\\Users\\tester\\AppData\\Local'
+  };
+  const chromePath = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+  const existsSync = candidate => candidate === chromePath;
+
+  const options = createChromeTargetLaunchOptions({
+    env,
+    existsSync,
+    workspaceDir: 'D:\\automation',
+    proxyServer: 'http://gate.yiyuan.example:10000'
+  });
+
+  assert.ok(options.args.includes('--proxy-server=http://gate.yiyuan.example:10000'));
+});
+
 test('finds the last-used local Chrome profile', () => {
   const env = { LOCALAPPDATA: 'C:\\Users\\tester\\AppData\\Local' };
   const userDataDir = 'C:\\Users\\tester\\AppData\\Local\\Google\\Chrome\\User Data';

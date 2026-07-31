@@ -9,6 +9,13 @@ const {
   createChromeTargetLaunchOptions,
   resetChromeAutomationProfile,
 } = require('./edge-launch');
+const { createProxySession } = require('./proxy-pool');
+const {
+  createCaptchaSolver,
+  extractCaptchaTaskFromPage,
+  injectCaptchaToken
+} = require('./captcha-solver');
+const { createEmailCodeFetcher } = require('./email-code');
 
 class PuppeteerRunner {
   /**
@@ -40,7 +47,13 @@ class PuppeteerRunner {
     captchaPollIntervalMs = 1000,
     verificationPollIntervalMs = 1000,
     cookieConsentPollIntervalMs = 250,
-    cookieConsentMaxAttempts = 40
+    cookieConsentMaxAttempts = 40,
+    captchaSolver,
+    emailCodeFetcher,
+    proxySessionFactory = createProxySession,
+    postCaptchaMaxAttempts = 30,
+    postCaptchaRetryMs = 1000,
+    postCaptchaNavWaitMs = 2000
   }) {
     this.users = users;
     this.automationConfig = automationConfig;
@@ -63,6 +76,16 @@ class PuppeteerRunner {
     this.verificationPollIntervalMs = verificationPollIntervalMs;
     this.cookieConsentPollIntervalMs = cookieConsentPollIntervalMs;
     this.cookieConsentMaxAttempts = cookieConsentMaxAttempts;
+    // Secrets come from process.env (.env). gmail_config.json only holds non-secret run settings.
+    this.captchaSolver = captchaSolver || createCaptchaSolver(automationConfig.captcha || {});
+    this.emailCodeFetcher = emailCodeFetcher || createEmailCodeFetcher({
+      provider: 'auto',
+      ...(automationConfig.email || {})
+    });
+    this.proxySessionFactory = proxySessionFactory;
+    this.postCaptchaMaxAttempts = postCaptchaMaxAttempts;
+    this.postCaptchaRetryMs = postCaptchaRetryMs;
+    this.postCaptchaNavWaitMs = postCaptchaNavWaitMs;
 
     this.browser = null;
     this.page = null;
@@ -71,6 +94,7 @@ class PuppeteerRunner {
     this.captchaTimer = null;
     this.captchaCheckRequested = false;
     this.currentTestName = '';
+    this.currentProxySession = null;
     this.resultsFile = path.join(__dirname, 'api_keys_test.md');
   }
 
@@ -126,6 +150,49 @@ class PuppeteerRunner {
     return !this.isStopped;
   }
 
+  async submitEmailVerificationCode(code, codeSelector) {
+    const typed = await this.page.evaluate((selector, value) => {
+      const input = document.querySelector(selector);
+      if (!input) return { ok: false, reason: 'input missing' };
+      input.focus();
+      input.value = '';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.value = value;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+
+      const isVisibleAndEnabled = control => {
+        if (!control || control.disabled || control.getAttribute?.('aria-disabled') === 'true') return false;
+        const rect = control.getBoundingClientRect();
+        const style = window.getComputedStyle(control);
+        return rect.width > 0 && rect.height > 0
+          && style.display !== 'none'
+          && style.visibility !== 'hidden';
+      };
+      const form = input.closest('form');
+      const controls = Array.from((form || document).querySelectorAll(
+        'button, input[type="submit"], input[type="button"], [role="button"]'
+      )).filter(isVisibleAndEnabled);
+      const submit = controls.find(control => {
+        const label = (control.textContent || control.value || control.getAttribute?.('aria-label') || '').trim();
+        return /^(继续|下一步|提交|验证|确认|Continue|Next|Submit|Verify|Confirm)$/i.test(label);
+      }) || controls.find(control => {
+        const type = (control.getAttribute?.('type') || control.type || '').toLowerCase();
+        return type === 'submit';
+      });
+      if (submit) submit.click();
+      return { ok: true, submitted: Boolean(submit) };
+    }, codeSelector, String(code));
+
+    if (!typed.ok) return false;
+    if (!typed.submitted) {
+      // Fallback: type via keyboard then Enter
+      await this.fillStandardInput(codeSelector, String(code), { maxAttempts: 2 });
+      await this.page.keyboard.press('Enter');
+    }
+    return true;
+  }
+
   async waitForManualVerificationCompletion(user) {
     if (this.isStopped) return;
     const codeSelector = 'input[type="text"][maxlength="6"], input[placeholder*="code"], input[placeholder*="Code"], input[placeholder*="验证码"], #verification-code, #code';
@@ -140,12 +207,38 @@ class PuppeteerRunner {
     }
 
     await this.setVerificationCodeBanner(true);
-    this.log(`✉️ [${user.testName}] 请直接在当前网页输入并提交邮箱验证码。`, 'warning');
-    this.onVerificationCodeRequired({
-      status: 'waiting',
-      user: user.testName,
-      message: '请在自动打开的网页中输入并提交邮箱验证码。'
-    });
+    const sinceMs = Date.now() - 2 * 60 * 1000;
+    let autoFilled = false;
+
+    if (this.emailCodeFetcher?.isEnabled?.()) {
+      this.log(`✉️ [${user.testName}] 正在从邮箱自动拉取验证码（plus-addressing：${user.testEmail}）...`, 'info');
+      this.onVerificationCodeRequired({
+        status: 'waiting',
+        user: user.testName,
+        message: '正在自动读取邮箱验证码…'
+      });
+      try {
+        const code = await this.emailCodeFetcher.waitForCode({
+          toEmail: user.testEmail,
+          sinceMs
+        });
+        if (code && !this.isStopped) {
+          this.log(`[INFO] [${user.testName}] 已获取邮箱验证码，正在填入并提交。`, 'info');
+          autoFilled = await this.submitEmailVerificationCode(code, codeSelector);
+        }
+      } catch (error) {
+        this.log(`[WARN] [${user.testName}] 自动读取邮箱验证码失败：${error.message}；改为人工输入。`, 'warning');
+      }
+    }
+
+    if (!autoFilled && !this.isStopped) {
+      this.log(`✉️ [${user.testName}] 请直接在当前网页输入并提交邮箱验证码。`, 'warning');
+      this.onVerificationCodeRequired({
+        status: 'waiting',
+        user: user.testName,
+        message: '请在自动打开的网页中输入并提交邮箱验证码。'
+      });
+    }
 
     let consecutiveHiddenChecks = 0;
     while (!this.isStopped && consecutiveHiddenChecks < 2) {
@@ -163,6 +256,8 @@ class PuppeteerRunner {
       } catch (error) {
         const navigationChangedContext = /execution context was destroyed|cannot find context with specified id/i.test(error.message);
         if (!navigationChangedContext) throw error;
+        // Navigation away from the code page is success.
+        isVisible = false;
       }
 
       consecutiveHiddenChecks = isVisible ? 0 : consecutiveHiddenChecks + 1;
@@ -505,11 +600,47 @@ class PuppeteerRunner {
     throw new Error('NVIDIA onboarding did not reach the API-key page after the expected transitions');
   }
 
-  async launchTargetBrowser() {
+  async prepareProxySession(user) {
+    this.currentProxySession = null;
+    const proxyConfig = this.automationConfig.proxy || {};
+    if (!proxyConfig.enabled) return null;
+    const sessionId = `${String(user?.testName || 'user').replace(/[^a-zA-Z0-9]/g, '').slice(0, 12)}${Math.random().toString(36).slice(2, 8)}`;
+    try {
+      const session = await this.proxySessionFactory(proxyConfig, {
+        sessionId,
+        testName: user?.testName || ''
+      });
+      if (session?.enabled) {
+        this.currentProxySession = session;
+        this.log(`[INFO] 已为 ${user?.testName || 'session'} 分配住宅代理会话 ${session.sessionId} → ${session.puppeteerProxy}`, 'info');
+      } else {
+        this.log('[WARN] 代理已启用但未能创建有效会话，将直连继续。', 'warning');
+      }
+      return this.currentProxySession;
+    } catch (error) {
+      this.log(`[WARN] 代理会话创建失败：${error.message}；将直连继续。`, 'warning');
+      return null;
+    }
+  }
+
+  async applyProxyAuthentication() {
+    if (!this.page || !this.currentProxySession?.authenticate) return;
+    try {
+      await this.page.authenticate(this.currentProxySession.authenticate);
+    } catch (error) {
+      this.log(`[WARN] 代理认证设置失败：${error.message}`, 'warning');
+    }
+  }
+
+  async launchTargetBrowser(user) {
+    await this.prepareProxySession(user);
     const profileOptions = {
       workspaceDir: this.workspaceDir,
       targetUserDataDir: this.targetUserDataDir
     };
+    if (this.currentProxySession?.puppeteerProxy) {
+      profileOptions.proxyServer = this.currentProxySession.puppeteerProxy;
+    }
     this.resetTargetProfile(profileOptions);
     try {
       const sourceProfile = this.chromeProfileFinder();
@@ -738,23 +869,111 @@ class PuppeteerRunner {
     }
   }
 
+  buildSolverProxyString() {
+    const session = this.currentProxySession;
+    if (!session?.enabled || !session.server) return '';
+    const hostPort = String(session.server).replace(/^(https?|socks5):\/\//i, '');
+    if (session.username || session.password) {
+      return `${hostPort}:${session.username || ''}:${session.password || ''}`;
+    }
+    return hostPort;
+  }
+
+  async tryAutoSolveCaptcha(user, activeCaptcha) {
+    if (!this.captchaSolver?.isEnabled?.()) return false;
+    try {
+      const task = await extractCaptchaTaskFromPage(this.page);
+      if (!task?.websiteKey) {
+        this.log(`[WARN] [${user.testName}] 未能提取 captcha sitekey，跳过自动打码。`, 'warning');
+        return false;
+      }
+      this.log(`[INFO] [${user.testName}] 正在调用 CapSolver 自动解决 ${task.type}…`, 'info');
+      const proxy = this.buildSolverProxyString();
+      const token = await this.captchaSolver.solve({
+        type: task.type,
+        websiteURL: task.websiteURL || (typeof this.page.url === 'function' ? this.page.url() : ''),
+        websiteKey: task.websiteKey,
+        proxy: proxy || undefined
+      });
+      if (!token) return false;
+      const injected = await injectCaptchaToken(this.page, token);
+      this.log(
+        injected
+          ? `[INFO] [${user.testName}] 已注入 captcha token。`
+          : `[WARN] [${user.testName}] captcha token 已获取但页面注入未确认，继续检测。`,
+        injected ? 'info' : 'warning'
+      );
+      // Give the page a moment to accept the token / enable Create Account.
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      return true;
+    } catch (error) {
+      this.log(`[WARN] [${user.testName}] 自动打码失败：${error.message}`, 'warning');
+      return false;
+    }
+  }
+
   async handleCaptchaIntervention(user) {
     let activeCaptcha = await this.detectCaptcha();
     if (!activeCaptcha) return;
     let consecutiveResolvedChecks = 0;
+    let accountReady = false;
 
     await this.setCaptchaBanner(true);
-    this.log(`⚠️ [${user.testName}] 检测到人机验证挑战 (${activeCaptcha})，请人工完成验证。`, 'warning');
     this.onCaptchaRequired({
       status: 'waiting',
       selector: activeCaptcha,
       user: user.testName,
-      message: '完成验证后系统会自动继续。'
+      message: '正在尝试自动完成验证，失败时请人工处理。'
     });
 
+    const markReadyIfAccountEnabled = async () => {
+      const label = await this.findEnabledAccountActionLabel();
+      if (label) {
+        accountReady = true;
+        consecutiveResolvedChecks = 2;
+        this.log(`[INFO] [${user.testName}] 检测到可点击的“${label}”（验证码已解锁表单），准备自动提交。`, 'info');
+        return true;
+      }
+      return false;
+    };
+
+    const autoTried = await this.tryAutoSolveCaptcha(user, activeCaptcha);
+    if (autoTried && !this.isStopped) {
+      // Confirm solved with the same two-poll rule used for human solves.
+      for (let i = 0; i < 6 && consecutiveResolvedChecks < 2 && !this.isStopped; i++) {
+        if (await markReadyIfAccountEnabled()) break;
+        const stillThere = await this.detectCaptcha();
+        if (stillThere) {
+          activeCaptcha = stillThere;
+          consecutiveResolvedChecks = 0;
+        } else {
+          consecutiveResolvedChecks++;
+        }
+        if (consecutiveResolvedChecks < 2) {
+          await new Promise(resolve => setTimeout(resolve, this.captchaPollIntervalMs));
+        }
+      }
+    }
+
+    if (consecutiveResolvedChecks < 2 && !this.isStopped) {
+      this.log(`⚠️ [${user.testName}] 检测到人机验证挑战 (${activeCaptcha})，请人工完成验证。`, 'warning');
+      this.onCaptchaRequired({
+        status: 'waiting',
+        selector: activeCaptcha,
+        user: user.testName,
+        message: '完成验证后系统会自动点击“创建账户/登录”。'
+      });
+    }
+
     while (consecutiveResolvedChecks < 2 && !this.isStopped) {
+      // NVIDIA often enables 创建账户 while the hCaptcha iframe stays mounted.
+      // Do not wait only on iframe disappearance — that blocks the auto-click forever.
+      if (await markReadyIfAccountEnabled()) break;
+
       const checkSource = await this.waitForCaptchaCheck();
       if (checkSource === 'stopped' || this.isStopped) break;
+
+      if (await markReadyIfAccountEnabled()) break;
 
       const detectedCaptcha = await this.detectCaptcha();
       if (detectedCaptcha) {
@@ -764,7 +983,7 @@ class PuppeteerRunner {
         consecutiveResolvedChecks++;
       }
       if (detectedCaptcha && checkSource === 'manual') {
-        const message = '仍未检测到验证结果，请完成验证后重试；系统会继续自动检测。';
+        const message = '仍未检测到验证结果，请完成验证后重试；系统会继续自动检测并尝试点击创建账户。';
         this.log(`⚠️ [${user.testName}] ${message}`, 'warning');
         this.onCaptchaRequired({
           status: 'waiting',
@@ -775,16 +994,82 @@ class PuppeteerRunner {
       }
     }
 
-    if (consecutiveResolvedChecks >= 2 && !this.isStopped) {
-      this.log(`✅ [${user.testName}] 验证通过，继续执行。`, 'success');
+    if ((consecutiveResolvedChecks >= 2 || accountReady) && !this.isStopped) {
+      this.log(
+        accountReady
+          ? `✅ [${user.testName}] 验证码已解锁账户按钮，继续自动点击。`
+          : `✅ [${user.testName}] 验证通过，继续执行。`,
+        'success'
+      );
       this.onCaptchaRequired({ status: 'resolved' });
       await this.setCaptchaBanner(false);
     }
   }
 
+  /**
+   * Label match for NVIDIA account primary action.
+   * Accepts 账户/帐户 variants, nested whitespace, and common EN/CN login labels.
+   */
+  static accountActionLabelPattern() {
+    return /^(创建[账帐]户|创建\s*账户|创建\s*帐户|Create\s*Account|登录|登录客户端|Log\s*In|Sign\s*In)$/i;
+  }
+
+  static isAccountActionLabel(raw) {
+    const label = String(raw || '').replace(/\s+/g, ' ').trim();
+    if (!label) return false;
+    if (PuppeteerRunner.accountActionLabelPattern().test(label)) return true;
+    // Nested Material buttons sometimes append icon text; allow contains for create-account only.
+    if (/创建[账帐]户/.test(label) && label.length <= 20) return true;
+    if (/^create\s*account$/i.test(label)) return true;
+    return false;
+  }
+
+  async collectVisibleAccountActionCandidates() {
+    if (!this.page) return [];
+    const targets = typeof this.page.frames === 'function' ? this.page.frames() : [this.page];
+    const all = [];
+    for (const frame of targets) {
+      try {
+        const found = await frame.evaluate(() => {
+          const isVisible = element => {
+            if (!element) return false;
+            const rect = element.getBoundingClientRect();
+            const style = window.getComputedStyle(element);
+            return rect.width > 0 && rect.height > 0
+              && style.display !== 'none'
+              && style.visibility !== 'hidden';
+          };
+          return Array.from(document.querySelectorAll(
+            'button, input[type="submit"], input[type="button"], [role="button"], a[role="button"]'
+          )).filter(isVisible).map(control => {
+            const label = (control.textContent || control.value || control.getAttribute?.('aria-label') || '')
+              .replace(/\s+/g, ' ')
+              .trim();
+            return {
+              label,
+              disabled: Boolean(control.disabled || control.getAttribute?.('aria-disabled') === 'true')
+            };
+          }).filter(item => item.label);
+        });
+        all.push(...(found || []));
+      } catch (error) {
+        // Frame may detach.
+      }
+    }
+    return all;
+  }
+
+  async findEnabledAccountActionLabel() {
+    const candidates = await this.collectVisibleAccountActionCandidates();
+    const match = candidates.find(item => !item.disabled && PuppeteerRunner.isAccountActionLabel(item.label));
+    return match ? match.label : null;
+  }
+
   async submitVisibleAccountAction() {
     if (this.isStopped || !this.page) return false;
-    const clickedLabel = await this.page.evaluate(() => {
+
+    // Only click when the control is truly enabled — never force-enable a disabled 创建账户.
+    const clickScript = () => {
       const isVisible = element => {
         if (!element) return false;
         const rect = element.getBoundingClientRect();
@@ -793,28 +1078,178 @@ class PuppeteerRunner {
           && style.display !== 'none'
           && style.visibility !== 'hidden';
       };
+      const isEnabled = control => {
+        if (!control || control.disabled) return false;
+        if (control.getAttribute?.('aria-disabled') === 'true') return false;
+        if (control.classList?.contains?.('disabled')) return false;
+        const style = window.getComputedStyle(control);
+        if (style.pointerEvents === 'none') return false;
+        return true;
+      };
+      const normalize = value => (value || '').replace(/\s+/g, ' ').trim();
+      const isAccountLabel = raw => {
+        const label = normalize(raw);
+        if (!label) return false;
+        if (/^(创建[账帐]户|Create\s*Account|登录|登录客户端|Log\s*In|Sign\s*In)$/i.test(label)) return true;
+        if (/创建[账帐]户/.test(label) && label.length <= 20) return true;
+        return false;
+      };
       const controls = Array.from(document.querySelectorAll(
-        'button, input[type="submit"], input[type="button"], [role="button"]'
+        'button, input[type="submit"], input[type="button"], [role="button"], a[role="button"]'
       ));
       const actionControl = controls.find(control => {
-        // Collapse incidental whitespace/newlines so spacing never breaks the match.
-        const label = (control.textContent || control.value || control.getAttribute?.('aria-label') || '').replace(/\s+/g, ' ').trim();
-        return /^(创建账户|Create Account|登录|登录客户端|Log In|Sign In)$/i.test(label)
+        return isAccountLabel(control.textContent || control.value || control.getAttribute?.('aria-label'))
           && isVisible(control)
-          && !control.disabled
-          && control.getAttribute?.('aria-disabled') !== 'true';
+          && isEnabled(control);
       });
       if (!actionControl) return null;
 
-      const label = (actionControl.textContent || actionControl.value || actionControl.getAttribute?.('aria-label') || '').trim();
+      const label = normalize(
+        actionControl.textContent || actionControl.value || actionControl.getAttribute?.('aria-label') || ''
+      );
+      // Mark only for a follow-up real pointer click; do not mutate disabled state.
+      actionControl.setAttribute?.('data-auto-account-action', '1');
+      actionControl.focus?.();
       actionControl.click();
+      try {
+        actionControl.dispatchEvent(new MouseEvent('click', {
+          bubbles: true,
+          cancelable: true,
+          view: window
+        }));
+      } catch (_) {}
       return label;
-    });
+    };
 
-    if (clickedLabel) {
+    const targets = typeof this.page.frames === 'function' ? this.page.frames() : [this.page];
+    for (const frame of targets) {
+      let clickedLabel = null;
+      try {
+        clickedLabel = await frame.evaluate(clickScript);
+      } catch (error) {
+        continue;
+      }
+      if (!clickedLabel) continue;
+
+      // Second path: real CDP/element click (Angular often ignores bare DOM click).
+      try {
+        const handle = await frame.$('[data-auto-account-action="1"]');
+        if (handle) {
+          try {
+            await handle.click({ delay: 40 });
+          } catch (error) {
+            const box = await handle.boundingBox();
+            if (box && this.page.mouse) {
+              await this.page.mouse.click(box.x + box.width / 2, box.y + box.height / 2, { delay: 40 });
+            }
+          }
+          try { await handle.dispose(); } catch (_) {}
+        }
+      } catch (error) {
+        // DOM click already fired; continue.
+      }
+
       this.log(`[INFO] 已自动点击当前可见的“${clickedLabel}”。`, 'info');
+      return true;
     }
-    return Boolean(clickedLabel);
+
+    // Diagnostics so operators can see why the click did not fire.
+    try {
+      const candidates = await this.collectVisibleAccountActionCandidates();
+      if (candidates.length > 0) {
+        const summary = candidates
+          .slice(0, 8)
+          .map(item => `"${item.label}"${item.disabled ? '(disabled)' : ''}`)
+          .join(', ');
+        this.log(`[WARN] 未点到创建账户/登录。当前可见按钮：${summary}`, 'warning');
+      } else {
+        this.log('[WARN] 未点到创建账户/登录：页面上没有可见的 button/submit 控件。', 'warning');
+      }
+    } catch (error) {
+      // ignore
+    }
+    return false;
+  }
+
+  async urlChangedFrom(previousUrl) {
+    if (!this.page || typeof this.page.url !== 'function') return false;
+    try {
+      return this.page.url() !== previousUrl;
+    } catch (error) {
+      // A destroyed frame usually means navigation started.
+      return /execution context was destroyed|cannot find context|Target closed|Session closed/i.test(error.message);
+    }
+  }
+
+  async waitForUrlChangeOrTimeout(previousUrl, timeout) {
+    if (await this.urlChangedFrom(previousUrl)) return true;
+    try {
+      await this.page.waitForFunction(url => location.href !== url, { timeout }, previousUrl);
+      return true;
+    } catch (error) {
+      if (this.isStopped) return false;
+      if (await this.urlChangedFrom(previousUrl)) return true;
+      const navigatedAway = /execution context was destroyed|cannot find context|Target closed|Session closed|frame was detached/i.test(error.message || '');
+      if (navigatedAway) return true;
+      // Do not rethrow: callers treat false as soft failure and keep retrying the user
+      // without tearing down mid-captcha for transient wait errors.
+      this.log(`[WARN] 等待页面前进超时或失败：${error.message}`, 'warning');
+      return false;
+    }
+  }
+
+  /**
+   * After captcha, repeatedly try 创建账户 / Create Account / Login until the page advances.
+   * Never throw for a missing button — that used to close Chrome mid-verification.
+   */
+  async resubmitAccountActionAfterCaptcha(previousUrl, user, timeout = this.manualStepTimeoutMs) {
+    this.log(`[INFO] [${user.testName}] 验证码阶段结束，开始自动点击“创建账户/登录”…`, 'info');
+    for (let attempts = 1; attempts <= this.postCaptchaMaxAttempts && !this.isStopped; attempts++) {
+      if (await this.urlChangedFrom(previousUrl)) {
+        this.log('✅ 验证完成后页面已自动前进。', 'success');
+        return true;
+      }
+      let clicked = false;
+      try {
+        clicked = await this.submitVisibleAccountAction();
+      } catch (error) {
+        if (/execution context was destroyed|cannot find context|Target closed|frame was detached/i.test(error.message || '')) {
+          if (await this.urlChangedFrom(previousUrl)) return true;
+        } else {
+          this.log(`[WARN] 点击创建账户/登录时出错：${error.message}`, 'warning');
+        }
+      }
+      if (clicked) {
+        this.log(`[INFO] 验证通过后已点击账户操作（第 ${attempts} 次尝试：创建账户/登录）。`, 'info');
+        // After a successful click, wait up to the full human-paced timeout for navigation.
+        const advanced = await this.waitForUrlChangeOrTimeout(previousUrl, timeout);
+        if (advanced) {
+          this.log('✅ 验证完成后已再次提交当前可见的账户操作，页面已继续。', 'success');
+          return true;
+        }
+        // Click registered but page stayed — try again (Angular may ignore first synthetic click).
+      } else {
+        if (attempts === 1 || attempts % 5 === 0) {
+          this.log(`[INFO] 验证完成后暂未点到“创建账户/登录”（第 ${attempts}/${this.postCaptchaMaxAttempts} 次）；保持窗口并重试。`, 'info');
+        }
+        // Button may still be disabled; also wait briefly for auto-navigation.
+        const advanced = await this.waitForUrlChangeOrTimeout(
+          previousUrl,
+          Math.min(this.postCaptchaNavWaitMs, timeout)
+        );
+        if (advanced) {
+          this.log('✅ 验证完成后页面已自动前进。', 'success');
+          return true;
+        }
+        if (this.postCaptchaRetryMs > 0) {
+          await new Promise(resolve => setTimeout(resolve, this.postCaptchaRetryMs));
+        }
+      }
+    }
+    if (await this.urlChangedFrom(previousUrl)) return true;
+    // Soft failure: do not throw — throwing previously closed Chrome mid-verification.
+    this.log(`[WARN] [${user.testName}] 验证后未能在时限内完成账户提交跳转（本轮不抛错，避免窗口被异常关闭）。`, 'warning');
+    return false;
   }
 
   async waitForAccountNavigationAfterCaptcha(
@@ -825,66 +1260,70 @@ class PuppeteerRunner {
     if (this.isStopped) return false;
     const submitted = await this.submitVisibleAccountAction();
     if (submitted) {
-      this.log('[INFO] 已提交当前账户操作；如出现人机验证，请在当前页面完成，之后将自动再次读取按钮文字并提交。', 'info');
+      this.log('[INFO] 已提交当前账户操作；如出现人机验证，请在当前页面完成，之后将自动再次点击“创建账户/登录”。', 'info');
     } else {
-      // The Create Account / Log In control is frequently disabled until the human
-      // clears the hCaptcha challenge. Keep the browser open and fall through to the
-      // wait below (which detects the captcha or a page transition) instead of
-      // throwing, which would tear the whole session down before verification.
+      // The Create Account / Log In control is frequently disabled until captcha clears.
+      // Keep the browser open and wait for captcha or navigation — never throw here.
       this.log('[INFO] 暂无可点击的账户操作按钮（通常需先完成人机验证）；保持窗口打开并等待验证或页面变化。', 'info');
     }
 
-    const stateHandle = await this.page.waitForFunction(url => {
-      if (location.href !== url) return 'navigated';
-      const selectors = [
-        'iframe[src*="recaptcha"]',
-        'iframe[src*="hcaptcha"]',
-        '.g-recaptcha',
-        '.h-captcha',
-        'iframe[src*="arkose"]',
-        '.arkose',
-        '#challenge-container',
-        'iframe[src*="turnstile"]',
-        '#challenge-form',
-        '#captcha',
-        '.captcha',
-        '[name*="captcha"]',
-        '#nvidia-captcha-container'
-      ];
-      const captchaVisible = selectors.some(selector => {
-        const element = document.querySelector(selector);
-        if (!element) return false;
-        const rect = element.getBoundingClientRect();
-        const style = window.getComputedStyle(element);
-        return rect.width > 0 && rect.height > 0
-          && style.display !== 'none'
-          && style.visibility !== 'hidden';
-      });
-      return captchaVisible ? 'captcha' : false;
-    }, { timeout }, previousUrl);
-    const state = await stateHandle.jsonValue();
-    await stateHandle.dispose();
+    let state = null;
+    try {
+      const stateHandle = await this.page.waitForFunction(url => {
+        if (location.href !== url) return 'navigated';
+        const selectors = [
+          'iframe[src*="recaptcha"]',
+          'iframe[src*="hcaptcha"]',
+          '.g-recaptcha',
+          '.h-captcha',
+          'iframe[src*="arkose"]',
+          '.arkose',
+          '#challenge-container',
+          'iframe[src*="turnstile"]',
+          '#challenge-form',
+          '#captcha',
+          '.captcha',
+          '[name*="captcha"]',
+          '#nvidia-captcha-container'
+        ];
+        const captchaVisible = selectors.some(selector => {
+          const element = document.querySelector(selector);
+          if (!element) return false;
+          const rect = element.getBoundingClientRect();
+          const style = window.getComputedStyle(element);
+          return rect.width > 0 && rect.height > 0
+            && style.display !== 'none'
+            && style.visibility !== 'hidden';
+        });
+        return captchaVisible ? 'captcha' : false;
+      }, { timeout }, previousUrl);
+      state = await stateHandle.jsonValue();
+      await stateHandle.dispose();
+    } catch (error) {
+      if (this.isStopped) return false;
+      if (await this.urlChangedFrom(previousUrl)) return true;
+      // If wait failed but captcha is present, continue into intervention.
+      const captchaNow = await this.detectCaptcha().catch(() => null);
+      if (captchaNow) {
+        state = 'captcha';
+      } else {
+        this.log(`[WARN] 等待账户页导航/验证码时出错：${error.message}`, 'warning');
+        return await this.urlChangedFrom(previousUrl);
+      }
+    }
 
     if (state === 'navigated' || this.isStopped) return !this.isStopped;
 
     await this.handleCaptchaIntervention(user);
     if (this.isStopped) return false;
 
-    if (typeof this.page.url === 'function' && this.page.url() !== previousUrl) {
+    if (await this.urlChangedFrom(previousUrl)) {
+      this.log('✅ 验证完成后页面已前进。', 'success');
       return true;
     }
-    const resubmitted = await this.submitVisibleAccountAction();
-    if (!resubmitted) {
-      // After the human solves the captcha, NVIDIA often auto-advances (the submit
-      // button becomes a spinner or is removed). Do not throw—that would close the
-      // browser mid-flow. Keep the window open and wait for the page to navigate.
-      this.log('[INFO] 验证完成后未找到可点击的账户操作按钮；等待页面自动跳转（保持窗口打开）。', 'info');
-    }
-    await this.page.waitForFunction(url => location.href !== url, { timeout }, previousUrl);
-    if (!this.isStopped) {
-      this.log('✅ 验证完成后已再次提交当前可见的账户操作，页面已继续。', 'success');
-    }
-    return !this.isStopped;
+
+    // Critical path: always re-click 创建账户 / Create Account / Login after captcha.
+    return this.resubmitAccountActionAfterCaptcha(previousUrl, user, timeout);
   }
 
   async fillStandardInput(selector, text, { stabilityDelayMs = 0, maxAttempts = 3 } = {}) {
@@ -1222,10 +1661,11 @@ class PuppeteerRunner {
               this.log(`[RETRY] 用户 "${user.testName}" 正在进行第 ${attempt - 1} 次重试...`, 'info');
             }
 
-            // Launch local Chrome with a disposable project-only profile.
-            this.browser = await this.launchTargetBrowser();
+            // Launch local Chrome with a disposable project-only profile (+ optional residential proxy).
+            this.browser = await this.launchTargetBrowser(user);
 
                 this.page = await this.selectTargetPage(this.browser);
+                await this.applyProxyAuthentication();
 
                 // Reassert a clean browser boundary for every user attempt before navigation.
                 await this.prepareCleanUserSession();

@@ -24,6 +24,8 @@ const elInterventionNoticeTitle = document.getElementById('intervention-notice-t
 const elInterventionNoticeMessage = document.getElementById('intervention-notice-message');
 const elAddUserFormContainer = document.getElementById('add-user-form-container');
 const elAddUserForm = document.getElementById('add-user-form');
+const elGmailStatus = document.getElementById('gmail-status');
+const elBtnGmailConnect = document.getElementById('btn-gmail-connect');
 
 // Initialize On Load
 window.addEventListener('DOMContentLoaded', () => {
@@ -31,12 +33,28 @@ window.addEventListener('DOMContentLoaded', () => {
   loadConfig();
   loadResults();
   setupSSE();
+  loadGmailStatus();
   
   // Bind Forms
   elConfigForm.addEventListener('submit', handleConfigSave);
   elAddUserForm.addEventListener('submit', handleAddUser);
   elBtnRun.addEventListener('click', handleRun);
   elBtnStop.addEventListener('click', handleStop);
+  if (elBtnGmailConnect) {
+    elBtnGmailConnect.addEventListener('click', handleGmailConnect);
+  }
+  window.addEventListener('message', event => {
+    if (event.origin !== window.location.origin) return;
+    if (event.data && event.data.type === 'gmail-oauth') {
+      loadGmailStatus();
+      if (event.data.ok) {
+        // Soft success notice without blocking the whole dashboard.
+        if (elGmailStatus) {
+          elGmailStatus.textContent = '✅ Gmail 授权完成，正在刷新状态…';
+        }
+      }
+    }
+  });
 });
 
 // ==========================================
@@ -59,9 +77,66 @@ async function loadConfig() {
     automationConfig = await res.json();
     elTargetUrl.value = automationConfig.targetUrl || 'https://build.nvidia.com/settings/api-keys';
     elParallelism.value = automationConfig.parallelism ?? 3;
+    if (automationConfig.gmail) {
+      renderGmailStatus(automationConfig.gmail);
+    }
   } catch (err) {
     console.error('加载配置失败', err);
   }
+}
+
+function renderGmailStatus(status) {
+  if (!elGmailStatus) return;
+  elGmailStatus.classList.remove('gmail-status-idle', 'gmail-status-ok', 'gmail-status-warn');
+  if (!status || !status.clientConfigured) {
+    elGmailStatus.classList.add('gmail-status-warn');
+    elGmailStatus.textContent = '⚠️ 请先在 .env 填写 GMAIL_CLIENT_ID 与 GMAIL_CLIENT_SECRET';
+    if (elBtnGmailConnect) elBtnGmailConnect.disabled = true;
+    return;
+  }
+  if (elBtnGmailConnect) elBtnGmailConnect.disabled = false;
+  if (status.connected) {
+    elGmailStatus.classList.add('gmail-status-ok');
+    const mailbox = status.mailbox ? `（${status.mailbox}）` : '';
+    elGmailStatus.textContent = `✅ 已连接 Gmail${mailbox}，可自动读取验证码`;
+  } else {
+    elGmailStatus.classList.add('gmail-status-idle');
+    elGmailStatus.textContent = '尚未授权。点击下方按钮使用 Google 官方登录。';
+  }
+}
+
+async function loadGmailStatus() {
+  try {
+    const res = await fetch('/api/gmail/status');
+    const status = await res.json();
+    renderGmailStatus(status);
+  } catch (err) {
+    if (elGmailStatus) {
+      elGmailStatus.classList.add('gmail-status-warn');
+      elGmailStatus.textContent = '无法读取 Gmail 状态：' + err.message;
+    }
+  }
+}
+
+function handleGmailConnect() {
+  // Open official Google OAuth in a popup (falls back to same tab if blocked).
+  const authUrl = '/api/gmail/auth';
+  const popup = window.open(
+    authUrl,
+    'novapura-gmail-oauth',
+    'width=520,height=720,menubar=no,toolbar=no,status=no'
+  );
+  if (!popup) {
+    window.location.href = authUrl;
+    return;
+  }
+  // When popup closes, refresh status (postMessage also handles success).
+  const timer = setInterval(() => {
+    if (popup.closed) {
+      clearInterval(timer);
+      loadGmailStatus();
+    }
+  }, 800);
 }
 
 async function handleConfigSave(e) {

@@ -15,7 +15,7 @@ test('dashboard uses Chinese copy and a passive intervention notice', () => {
   assert.match(html, /请在自动打开的网页中完成操作/);
   assert.doesNotMatch(html, /modal-overlay|verification-code-input|我已完成，立即检查|提交并继续/);
   assert.doesNotMatch(html, /HUMAN CAPTCHA REQUIRED|I've Solved It|Runner Status|Start Automation/);
-  assert.doesNotMatch(html, /Gmail/);
+  assert.match(html, /Gmail/);
   assert.match(html, /API Key/);
   assert.match(html, /NVIDIA/);
 });
@@ -37,9 +37,16 @@ test('server only broadcasts intervention state and exposes no intervention POST
   assert.doesNotMatch(server, /resolveVerificationCode/);
 });
 
-test('Gmail browser bootstrap is removed from dashboard and server', () => {
-  assert.doesNotMatch(html, /btn-gmail-login|gmailEmail|Gmail 持久化/);
-  assert.doesNotMatch(client, /handleGmailLogin|\/api\/gmail-login|elBtnGmailLogin/);
+test('dashboard exposes Google OAuth Gmail connect button', () => {
+  assert.match(html, /id="btn-gmail-connect"/);
+  assert.match(html, /用 Google 登录并连接 Gmail/);
+  assert.match(html, /id="gmail-status"/);
+  assert.match(client, /handleGmailConnect|\/api\/gmail\/auth/);
+  assert.match(client, /loadGmailStatus|\/api\/gmail\/status/);
+  assert.match(server, /\/api\/gmail\/auth/);
+  assert.match(server, /\/api\/gmail\/callback/);
+  assert.match(server, /buildGoogleAuthUrl|completeGmailOAuth/);
+  // Legacy Edge-profile Gmail bootstrap stays removed.
   assert.doesNotMatch(server, /launchGmailLoginBrowser|\/api\/gmail-login/);
 });
 

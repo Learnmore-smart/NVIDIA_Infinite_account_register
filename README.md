@@ -60,9 +60,7 @@ Copy-Item users_config_example.json users_config.json
 ]
 ```
 
-### 2. 运行配置 `gmail_config.json`
-
-控制目标页面与并发数。首次启动服务时若不存在会自动生成：
+### 2. 运行配置 `gmail_config.json`（仅非密钥）
 
 ```json
 {
@@ -72,7 +70,36 @@ Copy-Item users_config_example.json users_config.json
 ```
 
 - `targetUrl`：自动化目标页面地址。
-- `parallelism`：并发窗口数，**取值范围 1~5**（默认 3）。也可以在控制台里修改。
+- `parallelism`：并发窗口数，**1~5**（默认 3）。
+
+### 3. 密钥全部放在 `.env`（CapSolver + Gmail）
+
+启动时会自动加载项目根目录 `.env`，并补全缺失的密钥字段模板：
+
+```env
+# CapSolver
+CAPSOLVER_API_KEY=your_capsolver_key
+
+# Gmail OAuth 客户端（Google Cloud Console 创建）
+GMAIL_CLIENT_ID=...
+GMAIL_CLIENT_SECRET=...
+# 下面两项可点控制台「用 Google 登录并连接 Gmail」自动写入
+# GMAIL_REFRESH_TOKEN=
+# GMAIL_MAILBOX=
+```
+
+**连接 Gmail（推荐）：**
+
+1. 在 [Google Cloud Console](https://console.cloud.google.com/) 创建 OAuth 客户端（类型选「桌面应用」或「Web 应用」）。
+2. 启用 **Gmail API**；授权重定向 URI 添加：  
+   `http://localhost:8080/api/gmail/callback`
+3. 把 `Client ID` / `Client Secret` 写入 `.env`。
+4. 打开控制台 → 侧栏 **「用 Google 登录并连接 Gmail」** → 在官方 Google 窗口登录授权。
+5. 成功后 `GMAIL_REFRESH_TOKEN`（及邮箱）会写回 `.env`。
+
+- `users_config.json` 里可用 plus 地址：`you+test_user_5@gmail.com`。
+- 也可 IMAP：`EMAIL_CODE_PROVIDER=imap` + `TEST_GMAIL_EMAIL` + `TEST_GMAIL_APP_PASSWORD`。
+- 成功采集的 `nvapi-...` 仍会追加到同一 `.env`。
 
 ---
 
@@ -98,22 +125,25 @@ npm start
 2. **配置运行参数**：设置目标地址与并发窗口数（1~5）。
 3. **开始运行**：点击开始后，脚本会为每个用户打开一个独立的 Chrome 窗口并自动推进流程。
 4. **实时日志**：控制台通过 SSE 实时显示运行日志与状态。
-5. **人工介入**：遇到验证码或邮箱验证码时，请**直接在弹出的目标 Chrome 窗口内**完成操作（控制台仅显示状态提示）。
+5. **人工介入（回退）**：未配置打码/邮箱 API 时，验证码与邮箱验证码请**直接在目标 Chrome 窗口内**完成（控制台仅显示状态）。
 6. **停止**：随时可点击停止，脚本会清理临时浏览器资源。
 
 ---
 
 ## 六、自动化流程概览
 
-脚本会自动推进以下已知步骤（其余保持人工辅助）：
+脚本会自动推进以下已知步骤：
 
 - 自动关闭 Cookie 同意弹窗（优先「Reject Optional / Reject All」）。
 - 填写邮箱并自动点击 Next。
 - 填写账户表单并自动提交。
+- **人机验证**：优先 CapSolver；失败则人工。通过后**自动再点「创建账户 / Create Account / 登录」**（并防误关窗口）。
+- **邮箱验证码**：配置 Gmail API / IMAP 后自动拉取（支持 plus-addressing）并填入提交；否则人工。
 - 跳过通行密钥（点「稍后再说」），并自动确认「确定要跳过设置通行密钥吗？」弹窗中的「确定」。
 - 开发者设置确认页（「快完成了！/ 请确认以下信息以完成注册」）自动点击「提交」（两个推荐设置复选框保持不勾选）。
 - Cloud Account 命名页用 `testCompany` 填入账户名并自动点击「Create NVIDIA Cloud Account」。
 - 进入 Build API-key 页面后采集生成的 API Key。
+- 可选：每用户 sticky 住宅代理（Chrome `--proxy-server` + `page.authenticate`）。
 
 ---
 

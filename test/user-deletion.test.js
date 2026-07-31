@@ -90,6 +90,23 @@ function loadServerWithUsers(initialUsers) {
     if (request === 'body-parser') return { json: () => () => {} };
     if (request === 'fs') return fsImpl;
     if (request === 'path') return path;
+    if (request === './load-env') {
+      return {
+        bootstrapProjectEnv: () => ({ loaded: false, path: '', keys: [], bareApiKeys: 0 })
+      };
+    }
+    if (request === './gmail-oauth') {
+      return {
+        getGmailConnectionStatus: () => ({
+          clientConfigured: false,
+          connected: false,
+          mailbox: null
+        }),
+        buildGoogleAuthUrl: () => ({ url: 'https://accounts.google.com/' }),
+        completeGmailOAuth: async () => ({ success: true }),
+        renderOAuthResultPage: () => '<html></html>'
+      };
+    }
     if (request === './parallel-runner') {
       class ParallelPuppeteerRunner {}
       ParallelPuppeteerRunner.clampParallelism = value => Number.parseInt(value, 10) || 3;

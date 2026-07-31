@@ -291,6 +291,19 @@ function createChromeTargetLaunchOptions(options = {}) {
   if (extensionPaths.length > 0) {
     args.push(`--load-extension=${extensionPaths.join(',')}`);
   }
+  // Residential / gateway proxy for this Chrome worker (host:port or scheme://host:port).
+  // Auth is applied later via page.authenticate when username/password are present.
+  if (options.proxyServer) {
+    const proxyServer = String(options.proxyServer).trim();
+    if (proxyServer) {
+      args.push(`--proxy-server=${proxyServer}`);
+    }
+  }
+  if (Array.isArray(options.extraArgs)) {
+    for (const arg of options.extraArgs) {
+      if (arg) args.push(String(arg));
+    }
+  }
   return {
     executablePath: findChromeExecutable(options),
     userDataDir: targetUserDataDir,

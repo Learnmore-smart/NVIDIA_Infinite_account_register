@@ -45,7 +45,7 @@
 
         <div class="card mt-4">
           <h3>⚙️ 运行配置</h3>
-          <p class="section-tip">Captcha 和邮箱验证码都直接在自动打开的网页中完成；控制台只负责提醒。</p>
+          <p class="section-tip">密钥在 <code>.env</code>；人机验证可用 CapSolver，邮箱验证码可连 Gmail API。</p>
           <form id="config-form" class="config-form">
             <div class="form-group">
               <label for="targetUrl">目标注册地址</label>
@@ -57,6 +57,18 @@
             </div>
             <button type="submit" class="btn btn-secondary btn-block">保存配置</button>
           </form>
+        </div>
+
+        <div class="card mt-4">
+          <h3>📧 Gmail 验证码</h3>
+          <p class="section-tip">点击下方按钮打开 <strong>Google 官方登录</strong>，授权后自动写入 <code>.env</code> 的 refresh token。</p>
+          <div id="gmail-status" class="gmail-status gmail-status-idle" role="status">
+            正在检查 Gmail 连接状态…
+          </div>
+          <button type="button" id="btn-gmail-connect" class="btn btn-secondary btn-block mt-3">
+            🔐 用 Google 登录并连接 Gmail
+          </button>
+          <p class="section-tip mt-2">需已在 <code>.env</code> 配置 <code>GMAIL_CLIENT_ID</code> / <code>GMAIL_CLIENT_SECRET</code>，并在 Google Cloud 将回调地址设为 <code>http://localhost:8080/api/gmail/callback</code>。</p>
         </div>
       </aside>
 
