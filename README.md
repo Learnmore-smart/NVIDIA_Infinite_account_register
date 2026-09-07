@@ -1,6 +1,23 @@
-# Nvidia-js 使用说明
+# NVIDIA_Infinite_account_register
 
-一个本地运行的浏览器自动化工具：通过 Web 控制台批量管理测试用户，驱动本地 Chrome 完成 NVIDIA 账户注册流程，并采集生成的 API Key。整体采用 **人工辅助（manual-assist）** 模式——脚本自动填写表单和推进已知的固定步骤，但敏感环节（验证码、邮箱验证码等）保留人工介入。
+> **English & 简体中文说明**
+
+一个本地运行的浏览器自动化工具：通过 Web 控制台批量管理测试用户，驱动本地 Chrome 完成 NVIDIA 账户注册流程，并自动采集生成的 API Key。整体采用 **人工辅助（manual-assist）** 模式——脚本自动填写表单和推进已知的固定步骤，但敏感环节（验证码、邮箱验证码等）保留人工介入。
+
+---
+
+> [!IMPORTANT]
+> ### ⚠️ 重要前置依赖：必须自行安装 Tampermonkey（油猴）插件 / You need to get Tampermonkey yourself
+>
+> 本项目运行依赖本地 Chrome 中已安装的 **Tampermonkey（油猴）扩展**（Extension ID: `dhdgffkkebhmkfjojejmpbldmpobfkfo`）。
+>
+> 自动化脚本在启动 Chrome 窗口时，会直接从你本地 Chrome 的用户配置中同步该扩展。**如果你本地没有安装 Tampermonkey，程序启动时会直接报错终止**（提示：`Tampermonkey is not installed in Chrome profile ...`）。
+>
+> **步骤指南 / Steps:**
+> 1. **安装 Tampermonkey 扩展**：请在运行本项目前，自行前往 Chrome 网上应用店安装：
+>    - 商店链接：[Tampermonkey on Chrome Web Store](https://chromewebstore.google.com/detail/tampermonkey/dhdgffkkebhmkfjojejmpbldmpobfkfo)
+>    - 官方主页：[https://www.tampermonkey.net/](https://www.tampermonkey.net/)
+> 2. **导入配套油猴脚本**：安装好扩展后，在 Tampermonkey 中新建脚本，将本项目根目录下的 [`Nvidia-bypass-phone.user.js`](./Nvidia-bypass-phone.user.js) 脚本代码导入并启用。该脚本用于在 `build.nvidia.com` 页面上一键生成并提取 `AI_PLAYGROUNDS_KEY`。
 
 ---
 
@@ -8,6 +25,7 @@
 
 - **Node.js**（建议 18 及以上）
 - **本地已安装 Chrome**（脚本使用本机 Chrome，不使用 Puppeteer 自带浏览器）
+- **Chrome 内已安装 Tampermonkey（油猴）扩展**（必需，见上方说明）
 - **操作系统**：Windows（脚本包含 Windows 窗口焦点处理逻辑）
 
 ---
